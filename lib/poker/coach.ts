@@ -28,7 +28,7 @@ export const GLOSSARY: Record<string, { zh: string; detail: string }> = {
   EV: { zh: "期望值", detail: "长期重复同类决策时的平均收益。" },
   blocker: { zh: "阻断牌", detail: "自己持有的牌降低对手拥有某些强牌组合的概率。" },
   SPR: { zh: "筹码底池比", detail: "有效剩余筹码除以当前底池，用来衡量后续下注空间。" },
-  outs: { zh: "补牌", detail: "能在下一张公共牌改善当前组合的未知牌张数。" },
+  outs: { zh: "补牌", detail: "下一张公共牌能把牌型提升到顺子及以上的未知牌张数（补中顺子/同花，或两对、三条升葫芦，葫芦升四条）；仍停留在顺子以下的改善（提升踢脚、高牌配成一对、一对变两对/三条）都不计入。" },
   "pot odds": { zh: "底池赔率", detail: "跟注成本占跟注后总底池的比例。" },
   "thin value": { zh: "薄价值", detail: "用中等强度牌向更弱但可能跟注的牌下注。" },
   cooler: { zh: "冤家牌", detail: "双方都极强、通常很难合理逃脱的牌局。" },
@@ -82,6 +82,8 @@ export function buildCoachAdvice(view: PlayerViewState): CoachAdvice {
   const profile = analysis.handProfile;
   const rangeResponse = analysis.rangeResponse;
   const made = profile.madeLabel;
+  // 河牌之后没有公共牌可发，任何"下一张牌／听牌／补牌／改善机会"的说法在河牌都不成立。
+  const river = view.street === "river";
   const valueReach = rangeResponse.weakerRangeShare * rangeResponse.worseHandsContinue;
   const betterFoldReach = rangeResponse.betterRangeShare * rangeResponse.betterHandsFold;
   const strongDraw = ["combo-draw", "nut-flush-draw", "open-ended"].includes(profile.drawClass);
@@ -172,7 +174,9 @@ export function buildCoachAdvice(view: PlayerViewState): CoachAdvice {
       } else {
         action = "raise";
         target = betTarget(view, profile.vulnerability >= 0.55 ? 0.72 : 0.55);
-        reasons.push(`${profile.madeLabel}位于强价值区，加注目标是让较弱成牌和高质量听牌付费，而不是单纯因为权益超过某个阈值。`);
+        reasons.push(river
+          ? `${profile.madeLabel}位于强价值区，加注目标是让较弱的成牌愿意继续投入，而不是单纯因为权益超过某个阈值。`
+          : `${profile.madeLabel}位于强价值区，加注目标是让较弱成牌和高质量听牌付费，而不是单纯因为权益超过某个阈值。`);
         reasons.push(rangeResponse.summary);
       }
       confidence = profile.relativeTier === "nuts" || profile.relativeTier === "near-nuts" ? "高" : "中";
@@ -203,14 +207,16 @@ export function buildCoachAdvice(view: PlayerViewState): CoachAdvice {
       if (outs >= 8) {
         concepts.add("semi-bluff");
         concepts.add("outs");
-        reasons.push(`${outs} 张改善牌提供继续游戏的缓冲，但 outs 只是牌力改善数，不等于干净且必胜的补牌。`);
+        reasons.push(`${outs} 张补牌能把牌型提升到顺子及以上，为继续游戏提供缓冲；但补牌不等于干净且必胜的牌，仍要考虑对手的反向隐含赔率。`);
       }
       if (profile.drawClass === "non-nut-flush-draw") reasons.push("这是非坚果同花听牌：即使补中也可能输给更大同花，因此要为反向隐含赔率留出安全边际。 ");
       alternatives.push("位置不利、多人底池或对手范围极紧时，应把近似权益向下修正。 ");
     } else {
       action = "fold";
       confidence = "高";
-      reasons.push(`当前相对牌力与听牌质量不足以覆盖 ${(potOdds * 100).toFixed(0)}% 的跟注门槛，弃牌能阻止负 EV 累积。`);
+      reasons.push(river
+        ? `当前相对牌力不足以覆盖 ${(potOdds * 100).toFixed(0)}% 的跟注门槛，弃牌能阻止负 EV 累积。`
+        : `当前相对牌力与听牌质量不足以覆盖 ${(potOdds * 100).toFixed(0)}% 的跟注门槛，弃牌能阻止负 EV 累积。`);
       alternatives.push("不要因为已经投入筹码而继续；此前投入属于沉没成本。 ");
     }
   } else {
@@ -224,7 +230,11 @@ export function buildCoachAdvice(view: PlayerViewState): CoachAdvice {
       target = betTarget(view, profile.vulnerability >= 0.56 ? 0.67 : 0.50);
       reasons.push(`${profile.madeLabel}具备价值下注条件；关键不是“牌型够大”，而是模型仍找到约 ${Math.round(valueReach * 100)}% 的整体范围覆盖量由较差牌继续。`);
       if (rangeResponse.valueTargets.length > 0) reasons.push(`主要价值目标（希望跟注的较差牌）包括：${rangeResponse.valueTargets.join("、")}。`);
-      reasons.push(profile.vulnerability >= 0.56 ? "牌面或当前牌力较脆弱，尺度可以偏大，向听牌和高张收取价格。" : "牌面较稳定，使用中小尺度可让更多较差牌继续。 ");
+      reasons.push(profile.vulnerability >= 0.56
+        ? river
+          ? "当前牌力较脆弱，尺度可以偏大，让较弱的成牌为摊牌付出更高价格。"
+          : "牌面或当前牌力较脆弱，尺度可以偏大，向听牌和高张收取价格。"
+        : "牌面较稳定，使用中小尺度可让更多较差牌继续。 ");
       alternatives.push("若找不到任何更差跟注范围，应选择过牌，而不是机械价值下注。 ");
     } else if (strongDraw && legal.canBet && betterFoldReach >= 0.02) {
       action = "bet";
@@ -263,6 +273,11 @@ export function buildCoachAdvice(view: PlayerViewState): CoachAdvice {
     return Math.abs(line.target - target) <= Math.max(1, target * 0.2);
   });
   const purpose = selectedCandidate?.purpose;
+  // 坚果／近坚果档不存在（或几乎不存在）"比它更好的牌"，因此该档位绝不能用
+  // "让更好的牌弃掉"这类诈唬口径描述下注目的（见下方 actionReason 分支）。
+  const nutTier = profile.relativeTier === "nuts" || profile.relativeTier === "near-nuts";
+  // 板面本身即坚果等情形下，对手范围里根本没有愿意继续的更差牌，不能断言"从更差的牌取值"。
+  const noValueTarget = valueReach < 0.02;
   const neutralPercent = Math.round(neutralEquity * 100);
   const rangePercent = Math.round(equity * 100);
   const pricePercent = Math.round(potOdds * 100);
@@ -280,15 +295,35 @@ export function buildCoachAdvice(view: PlayerViewState): CoachAdvice {
   } else if (action === "check") {
     actionReason = profile.bluffCatcher || profile.relativeTier === "medium"
       ? `${profile.madeLabel}有一定摊牌价值，但暂时找不到足够多会跟注的更差牌，过牌控池更清楚。`
-      : "当前没有明确的价值目标或高质量诈唬目标，免费看下一张牌比勉强下注更好。";
+      : river
+        ? "当前没有明确的价值目标或高质量诈唬目标，河牌过牌保留摊牌价值比勉强下注更好。"
+        : "当前没有明确的价值目标或高质量诈唬目标，免费看下一张牌比勉强下注更好。";
   } else if (action === "all-in") {
     actionReason = "你的牌力与低 SPR 都支持投入剩余筹码；继续采用小尺度已经没有足够的后续下注空间。";
+  } else if (nutTier) {
+    const strengthText = profile.relativeTier === "nuts"
+      ? "是坚果牌：当前不存在比它更好的牌"
+      : "已经接近坚果：能赢它的组合极少";
+    if (noValueTarget) {
+      actionReason = `${profile.madeLabel}${strengthText}，但对手范围里愿意继续的更差牌也不多，这手下注主要是薄价值，不必期待很多跟注。`;
+    } else if (river) {
+      actionReason = `${profile.madeLabel}${strengthText}，河牌下注的目标就是从对手的跟注里拿到最大价值。`;
+    } else {
+      actionReason = `${profile.madeLabel}${strengthText}，下注的目标就是从更差的牌拿到最大价值，同时不让对手免费看下一张牌。`;
+    }
   } else if (purpose === "value" || purpose === "thin-value") {
     actionReason = `${profile.madeLabel}可以做价值下注：模型仍能找到愿意继续的更差牌，推荐${actionLabel}来收费。`;
   } else if (purpose === "semi-bluff") {
     actionReason = `${profile.drawLabel}适合半诈唬：对手现在弃牌可以直接获利，被跟注后你仍有补牌机会。`;
+  } else if (purpose === "fold-equity") {
+    actionReason = river
+      ? `${profile.madeLabel}这次下注主要靠弃牌权益：让一部分当前更强的牌弃掉。`
+      : `${profile.madeLabel}这次下注主要靠弃牌权益：让一部分当前更强的牌弃掉，同时避免对手免费实现权益。`;
   } else {
-    actionReason = "这次主动下注主要争取让部分当前更好的牌弃掉，同时避免对手免费实现权益。";
+    // range-protection：描述为保护性下注，兜底时也不套用"让更好的牌弃掉"的诈唬口径。
+    actionReason = river
+      ? `${profile.madeLabel}适合做薄价值下注：向愿意继续的更差牌取值，让对手用更弱的牌做决定。`
+      : `${profile.madeLabel}适合做保护性下注：既向可能继续的更差牌取值，也不给对手免费实现权益的机会。`;
   }
 
   let lesson: string;

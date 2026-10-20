@@ -432,7 +432,7 @@ function CoachCard({ advice }: { advice: CoachAdvice }) {
           ? <div><span>跟注门槛</span><b>{(analysis.potOdds * 100).toFixed(0)}%</b><small>低于胜率才有价格基础</small></div>
           : <div><span>仍在局中</span><b>{analysis.opponentRanges.length}</b><small>对手越多，获胜越难</small></div>}
         {analysis.outs > 0
-          ? <div><span>改善牌</span><b>{analysis.outs}</b><small>不保证都是干净 outs</small></div>
+          ? <div><span>补牌</span><b>{analysis.outs}</b><small>能直接提升到顺子及以上</small></div>
           : <div><span>你的位置</span><b>{analysis.positionSummary}</b><small>{BOARD_TEXTURE_COPY[analysis.boardTexture]}</small></div>}
       </div>
       <p className="neutral-equity-note">牌面胜率只使用你的底牌、公共牌和在局人数；不考虑任何玩家风格，所有未知牌等概率，平局按分池计算。</p>

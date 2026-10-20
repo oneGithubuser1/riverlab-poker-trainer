@@ -1,4 +1,4 @@
-﻿import { createDeck, withoutCards } from "./cards";
+import { createDeck, withoutCards } from "./cards";
 import { SeededRng } from "./rng";
 import type { Card } from "./types";
 
@@ -10,6 +10,13 @@ export interface HandScore {
 }
 
 const CATEGORY_NAMES = ["高牌", "一对", "两对", "三条", "顺子", "同花", "葫芦", "四条", "同花顺"];
+/** 牌型等级中"顺子"的下标（见 CATEGORY_NAMES 顺序）：补牌只统计达到顺子及以上的改善。 */
+const STRAIGHT_CATEGORY = 4;
+// 硬编码下标而非 indexOf("顺子")：一旦 CATEGORY_NAMES 被改动，indexOf 会静默返回 -1，
+// 使补牌判定退化成"任何牌型提升"且不报错。这里显式校验，改动顺序时立刻失败。
+if (CATEGORY_NAMES[STRAIGHT_CATEGORY] !== "顺子") {
+  throw new Error("CATEGORY_NAMES 的顺序改变了，需要同步 STRAIGHT_CATEGORY");
+}
 
 function straightHigh(ranks: number[]): number | null {
   const unique = [...new Set(ranks)].sort((a, b) => b - a);
@@ -127,13 +134,29 @@ export function estimateEquity(
   return equity / Math.max(1, iterations);
 }
 
+/**
+ * 统计"补牌"（outs）数：下一张公共牌能把牌型**提升到顺子及以上**的未知牌张数。
+ *
+ * 规则就是 `next.category >= 4 && next.category > current.category`，因此计入的包括
+ * 补中顺子／同花，以及已达到顺子以上的继续升级（例如三条升葫芦或四条：
+ * 7c7d / 7s Kh 2d 共 7 张，6 张凑葫芦、1 张凑四条）。**仍停留在顺子以下**的改善
+ * 一律不计：提升踢脚、高牌配成一对、一对变两对、一对变三条。
+ *
+ * 注意"两对变三条"实际不存在——两对再补中一张同点牌必然构成葫芦（属计入），
+ * 因此不要把"两对变三条"写进排除项。
+ *
+ * 旧实现用 `compareScores(next, current) > 0` 判定，只要踢脚序列变大就算改善，导致
+ * 翻牌后几乎所有未知牌都被计入（实测可达 43~47 张），进而使 `outs >= 8` 这类"强听牌"
+ * 门槛恒真、教练据此把负 EV 跟注当成正确打法。按牌型等级判定后，典型值恢复为
+ * 同花听牌 9、两头顺 8、卡顺 4、无听牌 0。
+ */
 export function countImprovementOuts(heroCards: Card[], community: Card[]): number {
   if (community.length < 3 || community.length >= 5) return 0;
   const known = [...heroCards, ...community];
   const current = evaluateSeven(known);
   return withoutCards(createDeck(), known).filter((card) => {
     const next = evaluateSeven([...known, card]);
-    return compareScores(next, current) > 0;
+    return next.category >= STRAIGHT_CATEGORY && next.category > current.category;
   }).length;
 }
 

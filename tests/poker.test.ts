@@ -7,7 +7,7 @@ import { createBotPersonality, createSeatRoster, chooseBotAction } from "../lib/
 import { auditAiReadability } from "../lib/poker/ai-audit";
 import { createDeck, parseCard, shuffledDeck, SUIT_SYMBOL } from "../lib/poker/cards";
 import { buildCoachAdvice } from "../lib/poker/coach";
-import { compareScores, evaluateFive, evaluateSeven } from "../lib/poker/evaluator";
+import { compareScores, countImprovementOuts, evaluateFive, evaluateSeven } from "../lib/poker/evaluator";
 import { applyAction, buildBotView, buildPlayerView, createTable, getLegalActions, potSize, settleShowdown, startHand } from "../lib/poker/engine";
 import { classifyRelativeHand } from "../lib/poker/hand-profile";
 import { buildBotLinePlan } from "../lib/poker/line-planner";
@@ -818,5 +818,133 @@ test("training logger writes readable and structured progress logs", () => {
     assert.equal(events[1].payload.chipConserved, true);
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function riverCoachAdvice(hole: string, board: string, facing = 0) {
+  const table = createTable({ smallBlind: 5, bigBlind: 10, difficulty: "expert", seats: createSeatRoster(1000, "expert", "coach-text") });
+  const state = startHand(table, "coach-text");
+  state.handId = "coach-text";
+  state.street = "river";
+  state.community = cards(board);
+  state.currentBet = facing;
+  state.minRaise = facing || state.bigBlind;
+  state.activeIndex = 0;
+  for (const [index, seat] of state.seats.entries()) {
+    seat.folded = index > 1;
+    seat.allIn = false;
+    seat.acted = false;
+    seat.raiseLocked = false;
+    seat.committedStreet = 0;
+    seat.committedHand = index <= 1 ? 300 : 0;
+  }
+  state.seats[0].stack = 720;
+  state.seats[0].holeCards = cards(hole);
+  if (facing > 0) {
+    // 下注记在行动者（对手）身上，英雄尚未跟注；这样 committedHand/committedStreet
+    // 的语义才是对的（旧写法把 facing 计到英雄头上，虽然底池总额与赔率恰好等价）。
+    state.seats[1].committedHand = 300 + facing;
+    state.seats[1].committedStreet = facing;
+    state.actionLog.push({
+      index: 0,
+      playerId: state.seats[1].id,
+      playerName: state.seats[1].name,
+      type: "bet",
+      amount: facing,
+      to: facing,
+      street: "river",
+      potBefore: 600,
+      timestamp: 1,
+    });
+  }
+  return buildCoachAdvice(buildPlayerView(state, "hero"));
+}
+
+const BLUFF_PHRASE = /让[^。；]{0,12}更(好|强)的牌(弃掉|放弃|弃牌)/;
+// 河牌没有下一张公共牌，因此"听牌／补牌／改善机会／免费看牌"在河牌一律不成立。
+const RIVER_IMPOSSIBLE = /下一张牌|免费看牌|免费实现权益|拒绝免费牌|听牌|补牌|改善机会/;
+const NUT_FRAMING = /是坚果牌|已经接近坚果/;
+
+test("coach explains nut hands as value, never as folding out better hands", () => {
+  // 期望档位写死：若相对档位分类漂移，这里直接失败，而不是让按档位生效的断言静默跳过。
+  const spots: Array<[string, string, string, string]> = [
+    ["nut flush", "As Ks", "Qs 7s 2s 3d 9h", "nuts"],
+    ["nut straight", "Jh Td", "9c 8s 2d 3h Qc", "nuts"],
+    ["quads", "9c 9d", "9s 9h 7d 2c 3s", "nuts"],
+    ["full house", "Kc Kh", "Ks 7d 7h 2c 3s", "near-nuts"],
+    ["board royal flush", "2c 3d", "Ah Kh Qh Jh Th", "nuts"],
+  ];
+  for (const [label, hole, board, expectedTier] of spots) {
+    const advice = riverCoachAdvice(hole, board);
+    const reason = advice.beginner.actionReason;
+    assert.equal(advice.analysis.handProfile.relativeTier, expectedTier, `${label} 的相对档位发生了变化`);
+    assert.equal(advice.action, "bet", `${label} 在当前筹码下应建议下注，否则会落到通用 all-in 文案`);
+    assert.equal(BLUFF_PHRASE.test(reason), false, `${label} 不应使用"让更好的牌弃掉"口径：${reason}`);
+    assert.match(reason, NUT_FRAMING, `${label} 应点明坚果档：${reason}`);
+    assert.equal(RIVER_IMPOSSIBLE.test(reason), false, `${label} 在河牌不应提到后续牌：${reason}`);
+    assert.equal(RIVER_IMPOSSIBLE.test(advice.reasons.join(" | ")), false, `${label} 的 reasons 在河牌不应提到后续牌：${advice.reasons.join(" | ")}`);
+  }
+});
+
+test("coach river reasons never mention draws that cannot exist", () => {
+  // 这三个牌例分别命中理由数组里原先含"听牌"的三处文案：弃牌、价值加注、脆弱牌价值下注。
+  // expected 断言同时充当防空转护栏——分支漂移时测试会失败而不是静默通过。
+  const spots: Array<[string, string, string, number, RegExp]> = [
+    ["fold vs big bet", "2c 7d", "Ks 9h 4d 3s Jc", 120, /当前相对牌力不足以覆盖/],
+    ["raise for value", "As Ks", "Qs 7s 2s 3d 9h", 60, /让较弱的成牌愿意继续投入/],
+    ["bet with fragile hand", "Kd 5s", "Jd 4c 3d 8s Kh", 0, /让较弱的成牌为摊牌付出更高价格/],
+  ];
+  for (const [label, hole, board, facing, expected] of spots) {
+    const advice = riverCoachAdvice(hole, board, facing);
+    const joined = advice.reasons.join(" | ");
+    assert.match(joined, expected, `${label} 未走到预期的河牌分支：${joined}`);
+    assert.equal(RIVER_IMPOSSIBLE.test(joined), false, `${label} 的 reasons 在河牌不应提到听牌/补牌：${joined}`);
+    assert.equal(RIVER_IMPOSSIBLE.test(advice.beginner.actionReason), false, `${label} 的 actionReason 在河牌不应提到听牌/补牌：${advice.beginner.actionReason}`);
+  }
+});
+
+test("coach river explanations never refer to draws or future cards", () => {
+  // 覆盖非坚果分支（check / fold-equity / nutTier 边界），同时检查 actionReason 与用户可见的 reasons。
+  const spots: Array<[string, string, string]> = [
+    ["air", "2c 7d", "Ks 9h 4d 3s Jc"],
+    ["TPTK", "Ac Kd", "Ks 7d 2h 9c 3s"],
+    ["overpair", "Ah Ad", "Ks 7d 2h 9c 3s"],
+    ["second nut flush", "Ks Js", "Qs 7s 2s 3d 9h"],
+  ];
+  const actions = new Set<string>();
+  const tiers = new Set<string>();
+  for (const [label, hole, board] of spots) {
+    const advice = riverCoachAdvice(hole, board);
+    const reason = advice.beginner.actionReason;
+    actions.add(advice.action);
+    tiers.add(advice.analysis.handProfile.relativeTier);
+    assert.ok(reason.length > 0, `${label} 必须给出理由`);
+    assert.equal(RIVER_IMPOSSIBLE.test(reason), false, `${label} 的 actionReason 在河牌不应提到后续牌：${reason}`);
+    assert.equal(RIVER_IMPOSSIBLE.test(advice.reasons.join(" | ")), false, `${label} 的 reasons 在河牌不应提到后续牌：${advice.reasons.join(" | ")}`);
+  }
+  // 防空转：这些牌例必须真的落在非坚果分支上，且覆盖不止一种动作，
+  // 否则本测试会在分类漂移后静默变成恒真。
+  assert.ok(
+    [...tiers].some((tier) => tier !== "nuts" && tier !== "near-nuts"),
+    `这些牌例应覆盖非坚果分支，实际档位：${[...tiers].join(",")}`,
+  );
+  assert.ok(actions.size >= 2, `这些牌例应覆盖多种动作分支，实际动作：${[...actions].join(",")}`);
+});
+
+test("out counting reflects real draw outs, not kicker upgrades", () => {
+  // 旧实现用 compareScores > 0 判定"改善"，把踢脚升级也算成补牌，翻牌后可达 43~47 张，
+  // 使 outs >= 8 这类"强听牌"门槛恒真。这里钉住扑克标准值。
+  const cases: Array<[string, string, string, number]> = [
+    ["nut flush draw", "As 5s", "Qs 8s 2h", 9],
+    ["open-ended straight draw", "Jc Ts", "9d 8h 2c", 8],
+    ["gutshot", "Jc Ts", "9d 7h 2c", 4],
+    ["backdoor only", "Jc Ts", "9d 5c 2h", 0],
+    ["air with no draw", "7c 2d", "Kh Qd Js", 0],
+    ["set outs to full house or quads", "7c 7d", "7s Kh 2d", 7],
+    ["make one pair only (kicker upgrade must not count)", "Ac 4d", "Ks 7d 2h", 0],
+    ["river has no future card", "As Ks", "Qs 7s 2s 3d 9h", 0],
+  ];
+  for (const [label, hole, board, expected] of cases) {
+    assert.equal(countImprovementOuts(cards(hole), cards(board)), expected, `${label} 的补牌数不符`);
   }
 });
